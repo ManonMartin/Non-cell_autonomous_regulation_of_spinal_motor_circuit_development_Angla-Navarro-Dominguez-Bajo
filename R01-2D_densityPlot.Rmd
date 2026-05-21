@@ -1,0 +1,515 @@
+---
+title: "2D density graphs of cell populations"
+author: "Manon Martin"
+date: '`r format(Sys.time(), "%B %d, %Y")`'
+output: 
+  html_document:
+    smart: FALSE
+    code_folding: hide
+    collapsed: yes
+    fig_caption: yes
+    highlight: tango
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r packages, include=FALSE, eval=TRUE}
+# Packages that need to be installed and loaded
+library(tidyverse)
+library(pander)
+library(readxl)
+library(xlsx)
+library(GGally)
+library(mvnTest)
+library(DescTools)
+library(car)
+library(cramer)
+library(GSAR)
+# library(gridExtra)
+library(cowplot)
+library(ggpubr)
+library(patchwork)
+# library(ggforce)
+library(bezier)
+library(purrr)
+library(tibble)
+library(pracma)
+
+```
+
+# Notes
+
+## Organize your analysis folder
+
+1. create an Rproject in the folder of your analysis
+2. the current analysis folder structure is:
+  - `main folder`: 
+    - `2D_densityPlot.Rmd`
+    - your `.Rproj` file
+  - `data/Foxp2`: 
+      - Foxp2_e12_measures_pos***.txt
+      - Foxp2_Hauteur_largeur.txt
+  - `results`: results from this analysis (`Foxp2-distances.xlsx`)
+  - `figures`: resulting figure from the analysis
+3. open the `.Rproj` file
+4. adapt the `2D_densityPlot.Rmd` file with your file names and condition (see below)
+5. knit the file
+
+## How to compute the cartesian coordinates
+
+
+<img src="doc/trigo.png" alt="trigo" style="width:300;height:180px;">
+
+- $b = cos(\alpha)*c$ 
+- $a = sin(\alpha)*c$ 
+
+rem: $\alpha$ is in radian
+
+- $\alpha$ -> `Angle` column in the data
+- $c$ -> `Length` column in the data
+
+
+
+# Import the data
+
+Here, the data are located in the `Foxp2` folder in the `data` folder.
+
+**`data_path` need to be adapted**
+
+`data_path`: relative path (from where the `Rproj.` file is located) to the measures and Hauteur_largeur files
+
+```{r}
+data_path <- "data/Chx10_e14"
+
+```
+
+
+The data files need to be named as follows:
+
+- **measures**: *treatment*_measures_pos*Position* where *treatment* and *Position* need to be adapted to your data (eg: "Foxp2_measures_posBrach.txt")
+- **Hauteur_largeur**: *treatment*_Hauteur_largeur.txt where *treatment* need to be adapted to your data (eg: "Foxp2_Hauteur_largeur.txt") and should match the *treatment* name from measures files
+
+
+```{r}
+data_names <- grep("measures", list.files(data_path), 
+                   value = TRUE, ignore.case = TRUE) # measures
+
+hl_name <- grep("Hauteur_largeur", list.files(data_path), 
+                value = TRUE, ignore.case = TRUE) # hauteur-largeur
+
+trt <- sub("_measures.*","",data_names[1]) # name
+
+es <- sub(".*_pos","",data_names)
+es <- sub("\\.txt$","",es)
+
+
+pander(paste0("positions: ",es))
+pander(paste0("data names: ",paste(data_names, collapse = ", ")))
+pander(paste0("hauteur largeur name: ",hl_name))
+pander(paste0("treatment: ",trt))
+
+if (!dir.exists("results/")){
+  dir.create("results/")
+}
+if (!dir.exists(paste0("figures/",trt,"/"))){
+  dir.create(paste0("figures/",trt,"/"),recursive=TRUE)
+}
+```
+
+We read the excel files and merge them ; then we compute distances (Polar --> cartesian coordinates (--> percentages)) with the `process_files` function.
+
+```{r}
+### read_excel_files and merge them
+### compute distances (Polar --> cartesian coordinates (--> percentages))
+
+# x=es[2]
+# path = data_path
+
+process_files <- function(path, data_names, hl_name,
+                                x, trt = "condition") {
+  # x: sheet name
+  pos <- x
+  
+  ## Import the data =================================
+  # dat ---------------------------
+  dat <- readr::read_tsv(file.path(path, paste0(trt, "_measures_pos",pos,".txt")),
+                         col_types = c( "d", "d", "c", "d", "f", "d"))
+  
+  cn =  c("Angle","Lenght",  "name", "cut_num", "cond", "Embryo")
+  if(!identical(colnames(dat)[1:6],cn)){
+    stop("colnames of measures file do not match: ", paste(cn, collapse=", "))
+  }
+ 
+  dat <- dat %>% rename("Length" = "Lenght")
+  dat$position <- pos
+
+  dat <- dat %>% select(Angle, Length, name, cut_num, cond, Embryo, position)
+  dat <- dat %>% mutate(name = tolower(gsub(" ","",name)), 
+                      position = stringr::str_to_title(position), 
+                      cond =  as.factor(tolower(cond)))
+  
+  # dat
+
+  # degree to radian
+  dat$Angle <- (dat$Angle * pi) / (180)
+
+  # LH ---------------------------
+  LH <- readr::read_tsv(file.path(path, paste0(trt, "_Hauteur_largeur.txt")),
+                        col_types = c("f", "d", "d", "c","f", "d"))
+
+  cn =  c("type", "Angle", "Lenght", "name", "position", "cut_num")
+  if(!identical(colnames(LH)[1:length(cn)],cn)){
+    stop("colnames of Hauteur_largeur file do not match: ", paste(cn, collapse=", "))
+  }
+  
+  LH <- LH %>% rename("Length" = "Lenght")
+  LH$type <- as.factor(LH$type)
+  LH$position <- as.factor(LH$position)
+  LH <- LH %>% mutate(name = tolower(gsub(" ","",name)), 
+                      position = stringr::str_to_title(position))
+  
+  # degree to radian
+  LH$Angle <- (LH$Angle * pi) / (180)
+
+  
+  
+  # LH
+
+  H_mat <- LH %>% filter(type == "Hauteur")
+  L_mat <- LH %>% filter(type == "Largeur")
+
+  ## Compute distances (Polar --> cartesian coordinates (--> percentages))  =================================
+
+  ## Height (H) and Width (W) distances ---------------------------
+
+  # - Height: looking for $a$
+  # - Width: looking for $b$
+
+  # H_mat <- H_mat %>%
+  #   mutate(H = Length * sin(Angle))  %>% # dorsoventral DV H
+  #   select(!c(type, Angle, Length))
+
+  H_mat <- H_mat %>%
+    mutate(H = Length) %>% # dorsoventral DV H
+    select(!c(type, Angle, Length))
+
+  # L_mat <- L_mat %>%
+  #   mutate(W = Length * cos(Angle))  %>% # mediolateral ML W
+  #   select(!c(type, Angle, Length))
+
+  L_mat <- L_mat %>%
+    mutate(W = Length) %>% # mediolateral ML W
+    select(!c(type, Angle, Length))
+
+  ## Dorsoventral (DV) and Mediolateral (ML) distances ---------------------------
+
+
+  # $ML =  cos(\alpha)  c / W$
+  # $DV =  sin(\alpha)  c / H$
+
+  dat_unique <- dat %>%
+    select(name, cut_num, position) %>%
+    unique() %>%
+    mutate(dat_mat = TRUE)
+
+  H_mat_unique <- H_mat %>%
+    filter(position == pos) %>%
+    mutate(H_mat = TRUE)
+
+  L_mat_unique <- L_mat %>%
+    filter(position == pos) %>%
+    mutate(L_mat = TRUE)
+
+  df <- dat_unique %>%
+    full_join(H_mat_unique, by = c("name", "position", "cut_num")) %>%
+    full_join(L_mat_unique, by = c("name", "position", "cut_num"))
+
+  # pander("missmatch between the two files?")
+  # cat("\n")
+  missmatch <- df %>% filter(is.na(dat_mat) | is.na(H_mat) | is.na(L_mat))
+  # print(missmatch)
+  # cat("\n")
+
+  dat <- dat %>%
+    left_join(H_mat, by = c("name", "position", "cut_num")) %>%
+    left_join(L_mat, by = c("name", "position", "cut_num")) %>%
+    mutate(
+      ML = Length * cos(Angle) * 100 / W,
+      DV = Length * sin(Angle) * 100 / H
+    )
+
+  # pander("summary of the data")
+  # cat("\n")
+  # print(summary(dat))
+
+  return(list(
+    data = dat, title = paste(trt, pos, sep = " - "),
+    pos = pos, trt = trt, missmatch = missmatch
+  ))
+}
+```
+
+
+```{r import}
+
+res_list <- map(.x = es, .f = process_files, 
+                path=data_path, data_names=data_names, 
+                hl_name = hl_name, 
+                trt = trt)
+names(res_list) <- es
+
+pander("sheet names (positions)")
+names(res_list)
+
+pander("Is there a missmatch between the two files? (eg condition is misspelled")
+missmatch = lapply(res_list, `[[`, "missmatch")
+if (sum(sapply(missmatch, nrow))>0){
+  warning("There is a missmatch between measures and Hauteur_largeur files", 
+          immediate. = TRUE)
+  missmatch
+}
+
+pander("Overview of the final data files")
+dat_list <- lapply(res_list, `[[`, "data")
+dat_list
+
+# write the results file
+xlsx::write.xlsx(
+  x = dat_list[[1]],
+  file = paste0("results/R01/", trt, "-distances.xlsx"),
+  sheetName = names(dat_list)[1], append = FALSE
+)
+
+if (length(names(dat_list)) > 1) {
+  for (i in names(dat_list)[-1]) {
+    xlsx::write.xlsx(
+      x = dat_list[[i]],
+      file = paste0("results/R01/", trt, "-distances.xlsx"),
+      sheetName = i, append = TRUE
+    )
+  }
+}
+```
+
+New columns of the final data files in `results/` folder ("*-distances.xlsx"):
+
+- `H`: total height (H) distances 
+- `W`: total Width (W) distances
+- `ML`: Medio-lateral position of interneuron 	
+- `DV`: Dorso-ventral position of interneuron 
+
+
+# Prepare a contour line made of splines from Bezier curves
+
+```{r}
+# plots a spline made of Bezier curves.
+
+XYA <- tibble::tribble(
+  ~x, ~y, ~angle,
+  0, -10, -30,
+  30, -15, 0,
+  100, 0, 40,
+  100, 40, 90,
+  100, 85, 140,
+  30, 100, 180,
+  0, 97, 195,
+)
+
+get_bezier_points <- function(i, XYA) {
+  # Compute Spline's Coordinates with get_bezier_points
+
+  t <- seq(0, 1, length = 100)
+
+  x <- XYA$x
+  y <- XYA$y
+  angles <- XYA$angle
+
+  angles[angles < 0] <- 360 + angles[angles < 0]
+  angles <- angles * pi / 180
+
+  xb <- c(0, 0, 0, 0)
+  yb <- c(0, 0, 0, 0)
+
+  # Start/end points
+  xb[1] <- x[i]
+  xb[4] <- x[i + 1]
+  yb[1] <- y[i]
+  yb[4] <- y[i + 1]
+
+  # Control points
+
+  strength <- .375 # DEFAULT_STRENGTH
+
+  rho <- pracma::hypot(x[i + 1] - x[i], y[i + 1] - y[i]) * strength
+
+  res_pol2cart <- pracma::pol2cart(c(angles[i], rho))
+  dx <- res_pol2cart[1]
+  dy <- res_pol2cart[2]
+  xb[2] <- xb[1] + dx
+  yb[2] <- yb[1] + dy
+
+  res_pol2cart <- pracma::pol2cart(c(angles[i + 1], rho))
+  dx <- res_pol2cart[1]
+  dy <- res_pol2cart[2]
+  xb[3] <- xb[4] - dx
+  yb[3] <- yb[4] - dy
+
+  # Get Bezier curve's coordinates:
+  bezier_points <- bezier(t = t, p = data.frame(xb, yb))
+  bezier_points
+}
+
+bezier_points <- map((seq_len(nrow(XYA) - 1)), get_bezier_points, XYA = XYA)
+bezier_points <- do.call(rbind, bezier_points)
+colnames(bezier_points) <- c("x", "y")
+bezier_points <- as.data.frame(bezier_points)
+```
+
+
+# Plot 2D density
+
+```{r}
+# colors
+col1 <- c("#518B8B", "#EE1289")
+col2 <- c("#CCC9C9", "#000000")
+col3 <- c("goldenrod2", "#0072B2")
+col_list <- list(col1 = col1, col2 = col2, col3 = col3)
+
+colChoice <- "col3"
+cols <- col_list[[colChoice]]
+```
+
+
+
+```{r}
+# empty list of plots
+p_list <- list()
+
+# create the plots
+for (i in seq_along(res_list)) {
+  res <- res_list[[i]]
+
+  res$data$cond <- relevel(res$data$cond, ref = "ctrl")
+  res$data$cond <- plyr::revalue(res$data$cond, replace = c("ctrl" = "Ctrl"))
+  table(res$data$cond)
+  names(cols) <- levels(res$data$cond)
+
+  dat <- res$data
+
+  # filter the data
+  dat <- dat[dat$ML >= -25, ]
+
+  ## 2d density plot ------------------
+  p <- dat %>% ggplot() +
+    geom_point(aes(x = ML, y = DV, color = cond), size = 0.25) +
+    geom_density_2d(aes(x = ML, y = DV, color = cond), linewidth = 0.4) +
+    theme_bw() +
+    geom_hline(
+      yintercept = 50, linetype = "dashed",
+      color = "firebrick", linewidth = 0.6, alpha = 0.4
+    ) +
+    geom_vline(
+      xintercept = 50, linetype = "dashed",
+      color = "firebrick", linewidth = 0.6, alpha = 0.4
+    ) +
+    labs(color = "Condition") +
+    theme(axis.title.y = element_text(angle = -90)) +
+    scale_color_manual(values = cols)
+
+  # add the contour line
+  p <- p + geom_path(
+    data = bezier_points, mapping = aes(x = x, y = y),
+    color = "gray50", linewidth = 0.4
+  )
+
+  p <- p +
+    annotate("text", x = -64, y = max(100, res$data$DV), label = "D") +
+    annotate("text", x = -64, y = -50, label = "V") +
+    annotate("text", x = -20, y = -77, label = "M") +
+    annotate("text", x = max(100, res$data$ML), y = -77, label = "L") +
+    coord_cartesian(
+      xlim = c(-20, max(100, res$data$ML)),
+      ylim = c(-50, max(100, res$data$DV)), clip = "off"
+    )
+
+  leg <- get_legend(p + theme(legend.title = element_blank()))
+
+  p <- p + theme(
+    legend.position = "none",
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black")
+  )
+
+
+  # ML density ------------------
+  dens1 <- dat %>% ggplot(aes(x = ML, fill = cond, color = cond)) +
+    geom_density(alpha = 0.4, size = 0.75) +
+    xlim(-50, max(100, dat$ML)) +
+    theme_void() +
+    theme(legend.position = "none") +
+    scale_fill_manual(values = cols) +
+    scale_color_manual(values = cols)
+
+  # DV density ------------------
+  dens2 <- dat %>% ggplot(aes(x = DV, fill = cond, color = cond)) +
+    geom_density(alpha = 0.4, size = 0.75) +
+    xlim(-50, max(100, dat$DV)) +
+    theme_void() +
+    theme(legend.position = "none") +
+    coord_flip() +
+    scale_fill_manual(values = cols) +
+    scale_color_manual(values = cols)
+
+  # plot layout with the patchwork package ------------------
+  layout <- "##AA
+  BBAA
+  DDC#"
+
+  pall <- as_ggplot(leg) + dens1 + dens2 + p +
+    plot_layout(design = layout, widths = c(2.5, 2.5, 1, 0.5), 
+                heights = c(0.5, 1, 8)) +
+    plot_annotation(res$title, 
+                    theme = theme(plot.title = element_text(hjust = 0.5)))
+  pall
+
+  p_list[[i]] <- pall
+
+  # pdf
+  ggsave(pall,
+    filename =  paste0("figures/",trt,"/",gsub(" ", "", res$title), ".pdf"),
+    width = 4.5, height = 6, scale = 0.6
+  )
+
+  # png
+  ggsave(pall,
+    filename = paste0("figures/",trt,"/",gsub(" ", "", res$title), ".png"),
+    width = 4.5, height = 6, scale = 0.6, device = "png"
+  )
+}
+
+p_list
+```
+
+
+
+# sessionInfo
+
+```{r}
+sessionInfo()
+```
+
