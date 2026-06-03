@@ -18,11 +18,11 @@ ML versus DV values were plotted using R with a 2D kernel density with a contour
 
 ## Software versions:
 
-R 4.4.2
-lme4 1.1-37
-lmerTest 3.1-3
-npmv 2.4.1
-ggplot2 3.5.2
-bezier 1.1.2
-pracma 2.4.4
+- R 4.4.2
+- lme4 1.1-37
+- lmerTest 3.1-3
+- npmv 2.4.1
+- ggplot2 3.5.2
+- bezier 1.1.2
+- pracma 2.4.4
 
